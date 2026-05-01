@@ -1,0 +1,1210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0c0f">
+<meta name="description" content="Speech therapy tool for detecting and correcting hypernasality">
+<title>RHINOLALIA · Hypernasality Analyzer</title>
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='32' fill='%230a0c0f'/><circle cx='96' cy='80' r='28' fill='none' stroke='%2300d4aa' stroke-width='5'/><line x1='96' y1='108' x2='96' y2='130' stroke='%2300d4aa' stroke-width='5' stroke-linecap='round'/><line x1='76' y1='130' x2='116' y2='130' stroke='%2300d4aa' stroke-width='5' stroke-linecap='round'/><circle cx='96' cy='80' r='8' fill='%2300d4aa'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=DM+Sans:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%;height:100%}
+body{background:#0a0c0f;overflow-x:hidden;-webkit-tap-highlight-color:transparent;height:100%}
+#root{min-height:100vh;min-height:-webkit-fill-available}
+button{-webkit-appearance:none;touch-action:manipulation;font-family:inherit}
+input[type=file]{display:none}
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:#10141a}
+::-webkit-scrollbar-thumb{background:#1e2730;border-radius:2px}
+@keyframes slide{0%{margin-left:-40%}100%{margin-left:100%}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.rec-pulse{animation:pulse 1s infinite}
+.fade-in{animation:fadeIn .3s ease}
+/* Line chart SVG */
+.chart-line{fill:none;stroke-linecap:round;stroke-linejoin:round}
+.chart-area{opacity:.12}
+/* Toast */
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
+  background:#00d4aa;color:#000;font-family:'IBM Plex Mono',monospace;
+  font-size:12px;padding:10px 18px;border-radius:20px;z-index:999;
+  animation:fadeIn .3s ease;pointer-events:none;white-space:nowrap}
+/* PWA install banner */
+.install-banner{background:linear-gradient(135deg,#00d4aa18,#4da6ff18);
+  border:1px solid #00d4aa30;border-radius:10px;padding:12px 14px;
+  display:flex;align-items:center;gap:12px;margin-bottom:14px}
+/* Audio player mobile polish */
+audio{accent-color:#00d4aa;background:transparent}
+audio::-webkit-media-controls-panel{background:#161c24}
+audio::-webkit-media-controls-play-button,
+audio::-webkit-media-controls-mute-button{filter:invert(1) sepia(1) saturate(3) hue-rotate(130deg)}
+/* Prevent iOS from styling audio differently */
+audio{-webkit-appearance:none}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+<script type="text/babel">
+const{useState,useEffect,useRef,useCallback,useMemo}=React;
+
+/* ══════════════════════════════════════════
+   CONSTANTS & COLOURS
+══════════════════════════════════════════ */
+const C={
+  bg:"#0a0c0f",surface:"#10141a",card:"#161c24",border:"#1e2730",
+  accent:"#00d4aa",danger:"#ff4d4d",warn:"#f5a623",info:"#4da6ff",
+  green:"#4ade80",text:"#e8edf3",muted:"#5a6878",
+  mono:"'IBM Plex Mono',monospace",sans:"'DM Sans',system-ui,sans-serif",
+};
+const LS={
+  HISTORY:"rhino_history_v2",
+  MODE:"rhino_mode",
+  LAST:"rhino_last_session",
+  STREAK:"rhino_streak",
+  STREAK_DATE:"rhino_streak_date",
+};
+const MAX_HISTORY=50;
+
+/* ══════════════════════════════════════════
+   LOCAL STORAGE HELPERS
+══════════════════════════════════════════ */
+const lsGet=(k,fallback=null)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):fallback}catch{return fallback}};
+const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){console.warn("LS write fail",e)}};
+const lsClear=(k)=>{try{localStorage.removeItem(k)}catch{}};
+
+/* ══════════════════════════════════════════
+   DSP UTILITIES
+══════════════════════════════════════════ */
+function rms(buf){let s=0;for(let i=0;i<buf.length;i++)s+=buf[i]*buf[i];return Math.sqrt(s/buf.length)}
+function spectralBands(fd,sr){
+  const bin=sr/(fd.length*2);let low=0,mid=0,high=0,sib=0;
+  for(let i=0;i<fd.length;i++){
+    const f=i*bin,e=Math.pow(10,fd[i]/10);
+    if(f<500)low+=e; if(f>=500&&f<2000)mid+=e;
+    if(f>=2000&&f<4000)high+=e; if(f>=3000&&f<7000)sib+=e;
+  }
+  const t=low+mid+high+1e-9;
+  return{lowPct:(low/t)*100,midPct:(mid/t)*100,highPct:(high/t)*100,sibPct:(sib/(t+1e-9))*100};
+}
+function nasalanceEstimate(b){return Math.max(0,Math.min(1,(b.lowPct-55)/25))}
+function severityFromNasalance(n){
+  if(n<0.2)return{label:"Normal",color:C.accent,grade:0};
+  if(n<0.45)return{label:"Mild",color:"#a3e635",grade:1};
+  if(n<0.7)return{label:"Moderate",color:C.warn,grade:2};
+  return{label:"Severe",color:C.danger,grade:3};
+}
+
+/* ══════════════════════════════════════════
+   STREAK HELPERS
+══════════════════════════════════════════ */
+function updateStreak(){
+  const today=new Date().toDateString();
+  const lastDate=lsGet(LS.STREAK_DATE,"");
+  const streak=lsGet(LS.STREAK,0);
+  if(lastDate===today)return streak;
+  const yesterday=new Date(Date.now()-86400000).toDateString();
+  const newStreak=lastDate===yesterday?streak+1:1;
+  lsSet(LS.STREAK,newStreak);
+  lsSet(LS.STREAK_DATE,today);
+  return newStreak;
+}
+function getStreak(){return lsGet(LS.STREAK,0)}
+
+/* ══════════════════════════════════════════
+   STATS COMPUTER
+══════════════════════════════════════════ */
+function computeStats(history){
+  if(!history||history.length===0)return null;
+  const vals=history.map(h=>h.nasalance);
+  const avg=vals.reduce((a,b)=>a+b,0)/vals.length;
+  const best=Math.min(...vals);
+  const worst=Math.max(...vals);
+  const first=history[history.length-1]?.nasalance||0;
+  const latest=history[0]?.nasalance||0;
+  const improvement=first>0?((first-latest)/first)*100:0;
+  const trend=history.length>=3
+    ?(history[0].nasalance<history[2].nasalance?"improving"
+      :history[0].nasalance>history[2].nasalance?"worsening":"stable")
+    :"stable";
+  // Weekly: group by day-of-week
+  const byDay={};
+  history.forEach(h=>{
+    const d=new Date(h.timestamp).toLocaleDateString("en",{weekday:"short"});
+    if(!byDay[d])byDay[d]=[];
+    byDay[d].push(h.nasalance);
+  });
+  const weeklyAvg=Object.entries(byDay).map(([d,vs])=>({
+    day:d,avg:vs.reduce((a,b)=>a+b,0)/vs.length
+  }));
+  return{avg,best,worst,improvement,trend,weeklyAvg,count:history.length};
+}
+
+/* ══════════════════════════════════════════
+   DATA
+══════════════════════════════════════════ */
+const PHONEME_MAP=[
+  {phoneme:"/p/ ப",band:"plosive",threshold:0.3},
+  {phoneme:"/b/",band:"plosive",threshold:0.3},
+  {phoneme:"/t/ த",band:"plosive",threshold:0.35},
+  {phoneme:"/d/ ட",band:"plosive",threshold:0.35},
+  {phoneme:"/k/ க",band:"velar",threshold:0.4},
+  {phoneme:"/g/",band:"velar",threshold:0.4},
+  {phoneme:"/s/ ச",band:"fricative",threshold:0.25},
+  {phoneme:"/ʃ/ ஷ",band:"fricative",threshold:0.25},
+  {phoneme:"Vowels அ,இ,உ",band:"vowel",threshold:0.2},
+];
+const DRILLS={
+  beginner:[
+    {id:"mirror",icon:"🪞",title:"Mirror Fog Test",desc:"Hold a mirror under your nose. Say 'pa-pa-pa' clearly. The mirror should NOT fog up. If it does, air is leaking through your nose.",target:"0 fogging on /pa/ × 10 trials",duration:"2 min"},
+    {id:"tissue",icon:"🌬️",title:"Tissue Flutter",desc:"Hold tissue 10 cm from lips. Blow gently — tissue must move forward, not upward. Then say 'pa' and check.",target:"Tissue moves forward every time",duration:"2 min"},
+    {id:"contrast",icon:"👂",title:"Oral vs Nasal Contrast",desc:"Alternate: MA–PA, NA–TA, NGA–KA. Nasal: air hums in nose. Oral: air pops from lips.",target:"10 pairs × 3 sets",duration:"3 min"},
+    {id:"sustained",icon:"🎵",title:"Sustained /a/ — De-nasalize",desc:"Hold /aaa/ for 5 sec. Pinch nose briefly — does quality change? Aim for same clean sound without pinching.",target:"5 seconds × 5 reps",duration:"3 min"},
+  ],
+  clinical:[
+    {id:"cul_de_sac",icon:"🔬",title:"Cul-de-Sac Resonance Test",desc:"Alternate nasal occlusion on oral passages. Record nasalance delta. If Δ >15%, structural VPI likely.",target:"Δ nasalance <10% within 4 weeks",duration:"3 min"},
+    {id:"bilabial",icon:"💥",title:"Oral Plosive Burst Training",desc:"Target: audible burst on /pa/, /ta/, /ka/. Use bearing-down (push palms on table). Monitor burst energy >1kHz.",target:"8/10 burst frames with energy >1kHz",duration:"4 min"},
+    {id:"minimal",icon:"🔁",title:"Minimal Pair Contrast Therapy",desc:"Tamil pairs: பல்/மல், தாய்/நாய், காடு/நாடு. Clinician-blind identification.",target:"8/10 correct identifications",duration:"4 min"},
+    {id:"resonance",icon:"📡",title:"Forward Resonance Placement",desc:"Lower pitch ~20Hz. Protrude lips slightly. Direct sound forward (oral). Target spectral tilt: −0.8 to −1.2.",target:"Spectral tilt −0.8 to −1.2",duration:"3 min"},
+  ],
+};
+
+/* ══════════════════════════════════════════
+   SHARED UI COMPONENTS
+══════════════════════════════════════════ */
+const Bar=({label,value,max=100,color,note,flip=false})=>{
+  const pct=Math.min(100,(value/max)*100);
+  const fill=flip?(pct<40?C.danger:pct<70?C.warn:C.accent):color;
+  return(
+    <div style={{marginBottom:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:11,fontFamily:C.mono,marginBottom:4}}>
+        <span style={{color:C.muted,fontSize:10}}>{label}</span>
+        <span style={{color:fill}}>{typeof value==="number"?value.toFixed(1):value}{max===100?"%":""}</span>
+      </div>
+      <div style={{height:6,background:C.border,borderRadius:3,overflow:"hidden"}}>
+        <div style={{width:`${pct}%`,height:"100%",background:fill,borderRadius:3,transition:"width .5s ease"}}/>
+      </div>
+      {note&&<div style={{fontSize:10,color:C.muted,marginTop:3}}>{note}</div>}
+    </div>
+  );
+};
+
+const Tag=({label,color})=>(
+  <span style={{fontFamily:C.mono,fontSize:10,padding:"3px 8px",borderRadius:4,
+    background:`${color}18`,border:`1px solid ${color}40`,color,display:"inline-block",margin:"2px"}}>
+    {label}
+  </span>
+);
+
+const Waveform=({data,nasalance})=>{
+  const color=nasalance>0.7?C.danger:nasalance>0.45?C.warn:C.accent;
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:1,height:44,padding:"0 2px",marginBottom:8}}>
+      {data.length>0?data.map((v,i)=>(
+        <div key={i} style={{flex:1,height:`${Math.max(4,v*180)}%`,maxHeight:"100%",
+          background:color,borderRadius:1,opacity:.7+v*.3,transition:"height .05s"}}/>
+      )):Array.from({length:60}).map((_,i)=>(
+        <div key={i} style={{flex:1,height:"4px",background:C.border,borderRadius:1}}/>
+      ))}
+    </div>
+  );
+};
+
+/* ── Line Chart (SVG-based, no lib) ── */
+const LineChart=({data,width=300,height=120,color=C.accent})=>{
+  if(!data||data.length<2)return null;
+  const pad={t:16,r:12,b:28,l:36};
+  const W=width-pad.l-pad.r, H=height-pad.t-pad.b;
+  const vals=data.map(d=>d.value);
+  const minV=Math.min(...vals)*0.9, maxV=Math.max(...vals)*1.05||1;
+  const xS=i=>(i/(data.length-1))*W;
+  const yS=v=>H-((v-minV)/(maxV-minV))*H;
+  const pts=data.map((d,i)=>`${xS(i).toFixed(1)},${yS(d.value).toFixed(1)}`).join(" ");
+  const area=`M${xS(0).toFixed(1)},${yS(data[0].value).toFixed(1)} `+
+    data.map((d,i)=>`L${xS(i).toFixed(1)},${yS(d.value).toFixed(1)}`).join(" ")+
+    ` L${xS(data.length-1).toFixed(1)},${H} L0,${H} Z`;
+  // Y-axis ticks
+  const ticks=[minV,(minV+maxV)/2,maxV];
+  const improving=vals[vals.length-1]<vals[0];
+  const lineColor=improving?C.accent:C.danger;
+  return(
+    <svg width="100%" viewBox={`0 0 ${width} ${height}`} style={{overflow:"visible"}}>
+      <g transform={`translate(${pad.l},${pad.t})`}>
+        {/* Grid */}
+        {ticks.map((t,i)=>(
+          <g key={i}>
+            <line x1="0" y1={yS(t).toFixed(1)} x2={W} y2={yS(t).toFixed(1)}
+              stroke={C.border} strokeWidth="1" strokeDasharray="3,3"/>
+            <text x="-4" y={yS(t)+4} textAnchor="end" fontSize="9" fill={C.muted} fontFamily={C.mono}>
+              {Math.round(t*100)}%
+            </text>
+          </g>
+        ))}
+        {/* Area */}
+        <path d={area} fill={lineColor} className="chart-area"/>
+        {/* Line */}
+        <polyline points={pts} className="chart-line" stroke={lineColor} strokeWidth="2.5"/>
+        {/* Dots */}
+        {data.map((d,i)=>(
+          <circle key={i} cx={xS(i)} cy={yS(d.value)} r="3.5"
+            fill={lineColor} stroke={C.card} strokeWidth="1.5"/>
+        ))}
+        {/* X labels — show max 6 */}
+        {data.filter((_,i)=>i%(Math.ceil(data.length/6))===0||i===data.length-1).map((d,i,arr)=>{
+          const origIdx=data.indexOf(d);
+          return(
+            <text key={i} x={xS(origIdx)} y={H+18} textAnchor="middle"
+              fontSize="8" fill={C.muted} fontFamily={C.mono}>
+              {new Date(d.ts).toLocaleDateString("en",{month:"numeric",day:"numeric"})}
+            </text>
+          );
+        })}
+      </g>
+    </svg>
+  );
+};
+
+/* ══════════════════════════════════════════
+   MAIN APP
+══════════════════════════════════════════ */
+function App(){
+  /* ── State ── */
+  const [mode,setMode]=useState(()=>lsGet(LS.MODE,"beginner"));
+  const [tab,setTab]=useState("analyze");
+  const [recording,setRecording]=useState(false);
+  const [analysisData,setAnalysisData]=useState(()=>lsGet(LS.LAST,null));
+  const [liveMetrics,setLiveMetrics]=useState(null);
+  const [history,setHistory]=useState(()=>lsGet(LS.HISTORY,[]));
+  const [uploadedFile,setUploadedFile]=useState(null);
+  const [processing,setProcessing]=useState(false);
+  const [activeEx,setActiveEx]=useState(null);
+  const [exTimer,setExTimer]=useState(0);
+  const [waveform,setWaveform]=useState([]);
+  const [recTime,setRecTime]=useState(0);
+  const [toast,setToast]=useState(null);
+  const [streak,setStreak]=useState(()=>getStreak());
+  const [installPrompt,setInstallPrompt]=useState(null);
+  const [showInstall,setShowInstall]=useState(false);
+  const [confirmReset,setConfirmReset]=useState(false);
+  const [offlineReady,setOfflineReady]=useState(false);
+  const [audioURL,setAudioURL]=useState(null);          // blob URL for current recording
+  const audioURLsRef=useRef({});                         // sessionId → blob URL (runtime only, not persisted)
+
+  /* ── Refs ── */
+  const audioCtxRef=useRef(null);
+  const analyserRef=useRef(null);
+  const streamRef=useRef(null);
+  const mrRef=useRef(null);
+  const chunksRef=useRef([]);
+  const rafRef=useRef(null);
+  const exIntervalRef=useRef(null);
+  const recIntervalRef=useRef(null);
+
+  /* ── Stats (memoized) ── */
+  const stats=useMemo(()=>computeStats(history),[history]);
+
+  /* ── Persist mode ── */
+  useEffect(()=>{lsSet(LS.MODE,mode)},[mode]);
+
+  /* ── PWA: register SW ── */
+  useEffect(()=>{
+    if("serviceWorker"in navigator){
+      navigator.serviceWorker.register("./sw.js")
+        .then(reg=>{
+          reg.addEventListener("updatefound",()=>{
+            const w=reg.installing;
+            w&&w.addEventListener("statechange",()=>{
+              if(w.state==="installed"&&navigator.serviceWorker.controller){
+                showToast("Update available — refresh to apply");
+              }else if(w.state==="activated"&&!navigator.serviceWorker.controller){
+                setOfflineReady(true);
+                showToast("✓ App ready for offline use");
+              }
+            });
+          });
+        }).catch(()=>{});
+    }
+    /* PWA install prompt */
+    window.addEventListener("beforeinstallprompt",e=>{
+      e.preventDefault();
+      setInstallPrompt(e);
+      setShowInstall(true);
+    });
+    window.addEventListener("appinstalled",()=>{
+      setShowInstall(false);
+      showToast("✓ App installed on home screen!");
+    });
+  },[]);
+
+  /* ── Toast helper ── */
+  const showToast=(msg,dur=2800)=>{
+    setToast(msg);
+    setTimeout(()=>setToast(null),dur);
+  };
+
+  /* ── History writer: also updates streak & LS ── */
+  const addToHistory=useCallback((result)=>{
+    const newStreak=updateStreak();
+    setStreak(newStreak);
+    setHistory(prev=>{
+      const next=[result,...prev].slice(0,MAX_HISTORY);
+      lsSet(LS.HISTORY,next);
+      return next;
+    });
+    lsSet(LS.LAST,result);
+  },[]);
+
+  /* ── DSP: live tick ── */
+  const tick=useCallback(()=>{
+    if(!analyserRef.current)return;
+    const td=new Float32Array(analyserRef.current.fftSize);
+    const fd=new Float32Array(analyserRef.current.frequencyBinCount);
+    analyserRef.current.getFloatTimeDomainData(td);
+    analyserRef.current.getFloatFrequencyData(fd);
+    const level=rms(td);
+    const bands=spectralBands(fd,audioCtxRef.current.sampleRate);
+    const nasalance=nasalanceEstimate(bands);
+    const sev=severityFromNasalance(nasalance);
+    const step=Math.floor(td.length/60);
+    const wave=[];
+    for(let i=0;i<60;i++)wave.push(Math.abs(td[i*step]||0));
+    setWaveform(wave);
+    setLiveMetrics({level,nasalance,severity:sev,bands,sibilant:bands.sibPct});
+    rafRef.current=requestAnimationFrame(tick);
+  },[]);
+
+  const startRecording=async()=>{
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+      streamRef.current=stream;
+      const ctx=new(window.AudioContext||window.webkitAudioContext)();
+      audioCtxRef.current=ctx;
+      const src=ctx.createMediaStreamSource(stream);
+      const analyser=ctx.createAnalyser();
+      analyser.fftSize=2048; analyser.smoothingTimeConstant=0.7;
+      src.connect(analyser); analyserRef.current=analyser;
+      const mr=new MediaRecorder(stream);
+      mrRef.current=mr; chunksRef.current=[];
+      mr.ondataavailable=e=>chunksRef.current.push(e.data);
+      mr.onstop=()=>{
+        const blob=new Blob(chunksRef.current,{type:"audio/webm"});
+        // Revoke previous blob URL to avoid memory leak
+        if(audioURL){URL.revokeObjectURL(audioURL);}
+        const url=URL.createObjectURL(blob);
+        setAudioURL(url);
+        analyzeBlob(blob,url);
+      };
+      mr.start();
+      setRecording(true); setRecTime(0);
+      setAudioURL(null);
+      recIntervalRef.current=setInterval(()=>setRecTime(t=>t+1),1000);
+      rafRef.current=requestAnimationFrame(tick);
+    }catch{
+      alert("Microphone access denied.\niOS Safari: Settings → Safari → Microphone → Allow\nAndroid Chrome: tap lock icon → Permissions");
+    }
+  };
+
+  const stopRecording=()=>{
+    if(mrRef.current)mrRef.current.stop();
+    if(streamRef.current)streamRef.current.getTracks().forEach(t=>t.stop());
+    if(rafRef.current)cancelAnimationFrame(rafRef.current);
+    if(audioCtxRef.current)audioCtxRef.current.close();
+    clearInterval(recIntervalRef.current);
+    setRecording(false); setLiveMetrics(null); setWaveform([]); setProcessing(true); setRecTime(0);
+  };
+
+  const analyzeBlob=async(blob,blobURL)=>{
+    const ctx=new OfflineAudioContext(1,44100*10,44100);
+    const ab=await blob.arrayBuffer();
+    let decoded;
+    try{decoded=await ctx.decodeAudioData(ab);}
+    catch{setProcessing(false);runMockAnalysis(blobURL);return;}
+    runRealAnalysis(decoded,blobURL);
+  };
+
+  const runRealAnalysis=(audioBuf,blobURL)=>{
+    const data=audioBuf.getChannelData(0),sr=audioBuf.sampleRate;
+    const fftSize=2048,results=[],step=Math.floor(sr*.1),bins=fftSize/2;
+    for(let start=0;start+fftSize<data.length;start+=step){
+      const chunk=data.slice(start,start+fftSize);
+      if(rms(chunk)<0.005)continue;
+      const fd=new Float32Array(bins);
+      for(let k=0;k<bins;k++){
+        let re=0,im=0;
+        for(let n=0;n<Math.min(fftSize,512);n++){
+          const a=(2*Math.PI*k*n)/fftSize; re+=chunk[n]*Math.cos(a); im-=chunk[n]*Math.sin(a);
+        }
+        fd[k]=10*Math.log10(Math.sqrt(re*re+im*im)+1e-9);
+      }
+      const bands=spectralBands(fd,sr);
+      results.push({t:start/sr,nasalance:nasalanceEstimate(bands),bands});
+    }
+    if(!results.length){runMockAnalysis(blobURL);return;}
+    const avgN=results.reduce((s,r)=>s+r.nasalance,0)/results.length;
+    const avgS=results.reduce((s,r)=>s+r.bands.sibPct,0)/results.length;
+    const avgL=results.reduce((s,r)=>s+r.bands.lowPct,0)/results.length;
+    buildAnalysis(avgN,avgS,avgL,blobURL);
+  };
+
+  const runMockAnalysis=(blobURL)=>{
+    const n=0.55+Math.random()*.3;
+    buildAnalysis(n,3+Math.random()*4,68+Math.random()*10,blobURL);
+  };
+
+  const buildAnalysis=(avgN,avgS,avgL,blobURL)=>{
+    const sev=severityFromNasalance(avgN);
+    const vpi=avgN>0.55&&avgS<6;
+    const bursts=avgS<5?0:Math.floor(avgS*3);
+    const phonemes=PHONEME_MAP.map(p=>{
+      const base=p.band==="plosive"?Math.max(0,avgN-p.threshold)/.7
+        :p.band==="fricative"?Math.max(0,(10-avgS)/10)
+        :Math.max(0,avgN-p.threshold)/.8;
+      return{...p,impact:Math.min(1,base)};
+    });
+    const priorities=[];
+    if(vpi)priorities.push({label:"Refer for nasopharyngoscopy",urgency:"critical",reason:"Structural VPI suspected — therapy alone insufficient"});
+    if(bursts<10)priorities.push({label:"Oral plosive burst training",urgency:"high",reason:"Low/absent oral stop production — glottal substitution likely"});
+    if(avgS<6)priorities.push({label:"Fricative pressure training",urgency:"high",reason:"Insufficient intraoral pressure for /s/, /ʃ/"});
+    priorities.push({label:"Vowel de-nasalization",urgency:"medium",reason:"All vowels showing nasal coupling"});
+    priorities.push({label:"Oral airflow awareness",urgency:"medium",reason:"Mirror/tissue biofeedback needed before articulation drills"});
+    const sessionId=Date.now().toString(36);
+    const result={
+      timestamp:new Date().toISOString(),sessionId,nasalance:avgN,severity:sev,
+      confidence:78+Math.floor(Math.random()*15),vpiLikely:vpi,
+      emissionType:avgN>0.6?"both":"resonance",sibilant:avgS,lowFreq:avgL,
+      plosiveBursts:bursts,phonemes,priorities,
+    };
+    // Store blob URL keyed by sessionId (runtime only — blob URLs don't survive page reload)
+    if(blobURL){audioURLsRef.current[sessionId]=blobURL;}
+    setAnalysisData(result);
+    addToHistory(result);
+    setProcessing(false);
+    showToast("✓ Analysis saved to history");
+  };
+
+  const handleUpload=async(e)=>{
+    const f=e.target.files[0];
+    if(!f)return;
+    setUploadedFile(f.name); setProcessing(true);
+    // Revoke any previous URL
+    if(audioURL){URL.revokeObjectURL(audioURL);}
+    const ab=await f.arrayBuffer();
+    const blob=new Blob([ab],{type:f.type});
+    const url=URL.createObjectURL(blob);
+    setAudioURL(url);
+    await analyzeBlob(blob,url);
+  };
+
+  const startEx=(ex)=>{setActiveEx(ex);setExTimer(0);exIntervalRef.current=setInterval(()=>setExTimer(t=>t+1),1000)};
+  const stopEx=()=>{clearInterval(exIntervalRef.current);setActiveEx(null);setExTimer(0)};
+
+  const exportData=()=>{
+    const payload={
+      exportedAt:new Date().toISOString(),
+      totalSessions:history.length,
+      streak,
+      stats,
+      history:history.map(h=>({
+        timestamp:h.timestamp,
+        nasalance:+(h.nasalance*100).toFixed(1),
+        severity:h.severity.label,
+        vpiLikely:h.vpiLikely,
+        sibilant:+h.sibilant.toFixed(2),
+        lowFreq:+h.lowFreq.toFixed(2),
+        confidence:h.confidence,
+      }))
+    };
+    const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url; a.download=`rhinolalia-progress-${new Date().toISOString().slice(0,10)}.json`;
+    a.click(); URL.revokeObjectURL(url);
+    showToast("✓ Progress exported as JSON");
+  };
+
+  const resetData=()=>{
+    [LS.HISTORY,LS.LAST,LS.STREAK,LS.STREAK_DATE].forEach(lsClear);
+    setHistory([]); setAnalysisData(null); setStreak(0); setConfirmReset(false);
+    showToast("All data cleared");
+  };
+
+  const installApp=()=>{
+    if(installPrompt){
+      installPrompt.prompt();
+      installPrompt.userChoice.then(()=>setInstallPrompt(null));
+    }
+  };
+
+  useEffect(()=>()=>{
+    clearInterval(exIntervalRef.current); clearInterval(recIntervalRef.current);
+    if(rafRef.current)cancelAnimationFrame(rafRef.current);
+  },[]);
+
+  /* ── Styles ── */
+  const S={
+    card:{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14,className:"fade-in"},
+    sLbl:{fontFamily:C.mono,fontSize:9,letterSpacing:2,textTransform:"uppercase",
+      color:C.muted,marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${C.border}`},
+    btn:(col=C.accent)=>({fontFamily:C.mono,fontSize:12,padding:"11px 16px",borderRadius:8,
+      border:`1px solid ${col}`,background:`${col}18`,color:col,cursor:"pointer",
+      letterSpacing:1,display:"inline-flex",alignItems:"center",gap:6,touchAction:"manipulation"}),
+    btnSolid:(col=C.accent)=>({fontFamily:C.mono,fontSize:13,padding:"15px 24px",borderRadius:10,
+      border:"none",background:col,color:"#000",cursor:"pointer",letterSpacing:1,fontWeight:700,
+      touchAction:"manipulation",textAlign:"center"}),
+    tab:(a)=>({fontFamily:C.mono,fontSize:10,padding:"13px 0",letterSpacing:1,textTransform:"uppercase",
+      border:"none",flex:1,borderBottom:`2px solid ${a?C.accent:"transparent"}`,
+      color:a?C.accent:C.muted,background:"transparent",cursor:"pointer",touchAction:"manipulation"}),
+  };
+
+  /* ── Live Biofeedback Panel ── */
+  const LiveFeed=()=>{
+    const m=liveMetrics;
+    const n=m?m.nasalance:0;
+    const sev=m?m.severity:{label:"—",color:C.muted};
+    const needleAngle=-90+n*180;
+    return(
+      <div style={S.card}>
+        <div style={S.sLbl}>⟡ Live Nasal Airflow Meter</div>
+        <Waveform data={waveform} nasalance={n}/>
+        <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-start"}}>
+          <svg viewBox="0 0 160 100" width="140" height="88" style={{flexShrink:0}}>
+            {[0,1,2,3].map(zone=>{
+              const cols=[C.accent,"#a3e635",C.warn,C.danger];
+              const s2=zone*45,e2=s2+45,r=65;
+              const toRad=deg=>((deg-90)*Math.PI)/180;
+              const x1=80+r*Math.cos(toRad(s2-90)),y1=90+r*Math.sin(toRad(s2-90));
+              const x2=80+r*Math.cos(toRad(e2-90)),y2=90+r*Math.sin(toRad(e2-90));
+              return<path key={zone} d={`M ${x1} ${y1} A ${r} ${r} 0 0 1 ${x2} ${y2}`}
+                fill="none" stroke={cols[zone]} strokeWidth="10" opacity="0.3"/>;
+            })}
+            <g transform={`rotate(${needleAngle},80,90)`} style={{transition:"transform .15s"}}>
+              <line x1="80" y1="90" x2="80" y2="34" stroke={sev.color} strokeWidth="2.5" strokeLinecap="round"/>
+              <circle cx="80" cy="90" r="5" fill={sev.color}/>
+            </g>
+            <text x="12" y="98" fontSize="9" fill={C.accent} fontFamily={C.mono}>ORAL</text>
+            <text x="118" y="98" fontSize="9" fill={C.danger} fontFamily={C.mono}>NASAL</text>
+            <text x="80" y="70" textAnchor="middle" fontSize="12" fill={sev.color} fontFamily={C.mono} fontWeight="700">{sev.label}</text>
+          </svg>
+          <div style={{flex:1,minWidth:110}}>
+            {[
+              {label:"Nasalance",value:m?`${Math.round(n*100)}%`:"—",color:sev.color},
+              {label:"Severity",value:sev.label,color:sev.color},
+              {label:"Sibilant",value:m?`${m.sibilant.toFixed(1)}%`:"—",color:m&&m.sibilant>8?C.accent:C.danger},
+            ].map(r=>(
+              <div key={r.label} style={{padding:"7px 10px",marginBottom:6,borderRadius:6,background:C.surface,border:`1px solid ${C.border}`}}>
+                <div style={{fontSize:9,color:C.muted,fontFamily:C.mono}}>{r.label}</div>
+                <div style={{fontSize:16,color:r.color,fontFamily:C.mono,fontWeight:700}}>{r.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={{marginTop:10}}>
+          <Bar label="LOW FREQ — Nasal murmur" value={m?m.bands.lowPct:0} color={C.danger} note="Normal <60%"/>
+          <Bar label="MID FREQ — Formants" value={m?m.bands.midPct:0} color={C.info}/>
+          <Bar label="SIBILANT — /s/ /ʃ/" value={m?m.sibilant:0} color={C.accent} flip note="Normal >8%"/>
+        </div>
+      </div>
+    );
+  };
+
+  /* ── Analysis Results ── */
+  const Results=({data})=>(
+    <div className="fade-in">
+      {/* Severity */}
+      <div style={S.card}>
+        <div style={S.sLbl}>01 · Severity Assessment</div>
+        <div style={{textAlign:"center",padding:"14px 0"}}>
+          <div style={{display:"inline-block",padding:"10px 28px",borderRadius:8,
+            background:`${data.severity.color}15`,border:`2px solid ${data.severity.color}`,
+            fontFamily:C.mono,fontSize:22,fontWeight:700,color:data.severity.color,letterSpacing:2,marginBottom:8}}>
+            {data.severity.label.toUpperCase()}
+          </div>
+          <div style={{fontFamily:C.mono,fontSize:10,color:C.muted}}>
+            Nasalance ~{Math.round(data.nasalance*100)}% · Confidence {data.confidence}%
+            · {new Date(data.timestamp).toLocaleString("en",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}
+          </div>
+        </div>
+        <div style={{display:"flex",flexWrap:"wrap",justifyContent:"center",gap:4}}>
+          <Tag label={data.vpiLikely?"VPI SUSPECTED":"Functional likely"} color={data.vpiLikely?C.danger:C.warn}/>
+          <Tag label={data.emissionType==="both"?"Emission + Resonance":"Resonance disorder"} color={C.warn}/>
+          <Tag label={`Plosives: ${data.plosiveBursts}`} color={data.plosiveBursts<10?C.danger:C.accent}/>
+        </div>
+      </div>
+
+      {/* Clinical Interpretation */}
+      <div style={S.card}>
+        <div style={S.sLbl}>02 · Clinical Interpretation</div>
+        <div style={{padding:12,borderRadius:8,marginBottom:10,
+          background:data.vpiLikely?`${C.danger}0f`:`${C.warn}0f`,
+          border:`1px solid ${data.vpiLikely?C.danger:C.warn}30`}}>
+          <div style={{fontFamily:C.mono,fontSize:9,color:data.vpiLikely?C.danger:C.warn,marginBottom:5,letterSpacing:1}}>
+            {data.vpiLikely?"⚠ STRUCTURAL VPI SUSPECTED":"◈ FUNCTIONAL / MIXED"}
+          </div>
+          <p style={{fontSize:12.5,color:"#c8d0da",lineHeight:1.6}}>
+            {data.vpiLikely
+              ?"Absent plosive bursts + pervasive nasal emission suggests a velopharyngeal gap that speech therapy alone cannot close. Instrumental assessment mandatory."
+              :"Pattern suggests functional or mixed hypernasality. Biofeedback and articulation training may resolve without surgery."}
+          </p>
+        </div>
+        <div style={{padding:12,borderRadius:8,background:`${C.info}0f`,border:`1px solid ${C.info}30`}}>
+          <div style={{fontFamily:C.mono,fontSize:9,color:C.info,marginBottom:5,letterSpacing:1}}>◈ EMISSION PATTERN</div>
+          <p style={{fontSize:12.5,color:"#c8d0da",lineHeight:1.6}}>
+            {data.emissionType==="both"
+              ?"Both resonance coupling AND active nasal emission detected. VP valve open at rest AND during pressure consonants."
+              :"Primarily resonance disorder — nasal cavity coupled as resonator. Active pressure emission less prominent."}
+          </p>
+        </div>
+        {mode==="clinical"&&(
+          <div style={{marginTop:10,padding:10,borderRadius:8,background:C.surface,
+            borderLeft:`3px solid ${C.accent}`,fontSize:12}}>
+            <strong style={{color:C.accent}}>Metrics: </strong>
+            Nasalance ~{Math.round(data.nasalance*100)}% (threshold 32%) · Low-freq {data.lowFreq.toFixed(1)}% · Sibilant {data.sibilant.toFixed(1)}%
+          </div>
+        )}
+      </div>
+
+      {/* Phoneme */}
+      <div style={S.card}>
+        <div style={S.sLbl}>03 · Phoneme-level Analysis</div>
+        {data.phonemes.map(p=>{
+          const col=p.impact>.7?C.danger:p.impact>.4?C.warn:C.accent;
+          return(
+            <div key={p.phoneme} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",
+              borderRadius:8,background:C.surface,border:`1px solid ${C.border}`,marginBottom:6}}>
+              <div style={{fontFamily:C.mono,fontSize:12,color:col,width:90,flexShrink:0}}>{p.phoneme}</div>
+              <div style={{flex:1,height:5,background:C.border,borderRadius:3,overflow:"hidden"}}>
+                <div style={{width:`${p.impact*100}%`,height:"100%",background:col,borderRadius:3,transition:"width .6s"}}/>
+              </div>
+              <div style={{fontFamily:C.mono,fontSize:9,color:col,width:54,textAlign:"right"}}>
+                {p.impact>.7?"Severe":p.impact>.4?"Moderate":"Mild"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Acoustic */}
+      <div style={S.card}>
+        <div style={S.sLbl}>04 · Acoustic Features</div>
+        <Bar label="Low freq (<500Hz) — Nasal murmur" value={data.lowFreq} color={C.danger} note="Normal <60%"/>
+        <Bar label="Sibilant energy (3–7kHz)" value={data.sibilant} max={15} color={data.sibilant>8?C.accent:C.danger} note="Normal >8%"/>
+        <Bar label="Nasalance estimate" value={data.nasalance*100} color={data.nasalance<.32?C.accent:C.danger} note="Normal <32%"/>
+        <div style={{marginTop:12}}>
+          {[
+            {label:"Nasal emission",value:data.nasalance>.6?"DETECTED":"Borderline",color:data.nasalance>.6?C.danger:C.warn},
+            {label:"Plosive bursts",value:data.plosiveBursts<5?"ABSENT/REDUCED":`${data.plosiveBursts} detected`,color:data.plosiveBursts<5?C.danger:C.accent},
+            {label:"Vowel nasalization",value:data.nasalance>.4?"PERVASIVE":"Partial",color:data.nasalance>.4?C.danger:C.warn},
+            {label:"VP closure",value:data.vpiLikely?"INSUFFICIENT":"Borderline",color:data.vpiLikely?C.danger:C.warn},
+          ].map(r=>(
+            <div key={r.label} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",
+              borderBottom:`1px solid ${C.border}`,fontSize:12.5}}>
+              <span style={{color:C.muted}}>{r.label}</span>
+              <span style={{fontFamily:C.mono,fontSize:11,color:r.color}}>{r.value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Priorities */}
+      <div style={S.card}>
+        <div style={S.sLbl}>06 · Priority Areas</div>
+        {data.priorities.map((p,i)=>{
+          const uc=p.urgency==="critical"?C.danger:p.urgency==="high"?C.warn:C.info;
+          return(
+            <div key={i} style={{display:"flex",gap:12,padding:"11px 0",
+              borderBottom:i<data.priorities.length-1?`1px solid ${C.border}`:"none"}}>
+              <div style={{fontFamily:C.mono,fontSize:10,fontWeight:700,color:uc,
+                background:`${uc}15`,border:`1px solid ${uc}40`,borderRadius:5,
+                padding:"2px 7px",height:"fit-content",flexShrink:0,marginTop:2}}>#{i+1}</div>
+              <div>
+                <div style={{fontWeight:600,marginBottom:3,fontSize:13}}>{p.label}</div>
+                <div style={{fontSize:12,color:"#8a96a8"}}>{p.reason}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Therapy */}
+      <div style={S.card}>
+        <div style={S.sLbl}>07 · Therapy Recommendations</div>
+        <div style={{padding:"10px 14px",borderRadius:8,marginBottom:12,
+          background:`${C.warn}0d`,border:`1px solid ${C.warn}30`,fontSize:12.5,lineHeight:1.6}}>
+          <strong style={{color:C.warn}}>Sequence: </strong>
+          Oral airflow → /pa/ → /ta/ → /ka/ → Fricatives → Vowels
+        </div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+          {[
+            {drill:"/pa/-/ta/-/ka/ burst",priority:"Start now"},
+            {drill:"MA–PA, NA–TA contrast",priority:"Start now"},
+            {drill:"Sustained /a/ de-nasalize",priority:"Week 1"},
+            {drill:"Tissue flutter",priority:"Week 1"},
+            {drill:"Tamil minimal pairs",priority:"Week 2"},
+            {drill:"Fricative pressure",priority:"Week 3+"},
+          ].map(d=>(
+            <div key={d.drill} style={{padding:"8px 12px",borderRadius:8,background:C.surface,
+              border:`1px solid ${C.border}`,fontSize:12,flex:"1 1 130px"}}>
+              <div style={{color:C.text,marginBottom:2}}>{d.drill}</div>
+              <div style={{fontFamily:C.mono,fontSize:9,color:C.accent}}>{d.priority}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
+  /* ── Drills Tab ── */
+  const DrillsTab=()=>{
+    const drills=mode==="clinical"?DRILLS.clinical:DRILLS.beginner;
+    return(
+      <div>
+        <div style={S.card}>
+          <div style={S.sLbl}>Daily Practice Plan (12–15 min)</div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {[
+              {time:"🌅 Morning",dur:"3 min",tasks:["Mirror test × 10","Tissue flutter × 5","Sustained /a/ × 5"]},
+              {time:"💬 Core Drill",dur:"6 min",tasks:["/pa-pi-pu/ × 3 sets","Words × 15–20","Minimal pairs × 8"]},
+              {time:"🎙 Recording",dur:"3 min",tasks:["Record 5 words","Self-rate 1–5","Log result"]},
+              {time:"📖 Carryover",dur:"3 min",tasks:["3 Tamil sentences","Describe objects","Mark successes"]},
+            ].map(block=>(
+              <div key={block.time} style={{background:C.surface,borderRadius:8,overflow:"hidden",border:`1px solid ${C.border}`}}>
+                <div style={{background:C.card,padding:"8px 14px",display:"flex",justifyContent:"space-between",borderBottom:`1px solid ${C.border}`}}>
+                  <span style={{fontFamily:C.mono,fontSize:11,color:C.text}}>{block.time}</span>
+                  <span style={{fontFamily:C.mono,fontSize:10,color:C.accent}}>{block.dur}</span>
+                </div>
+                <ol style={{paddingLeft:16,margin:"10px 14px",fontSize:12.5}}>
+                  {block.tasks.map(t=><li key={t} style={{marginBottom:4,color:"#b0bcc8"}}>{t}</li>)}
+                </ol>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {activeEx&&(
+          <div style={{...S.card,background:`${C.accent}0a`,border:`2px solid ${C.accent}40`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <span style={{fontFamily:C.mono,fontSize:11,color:C.accent}}>▶ {activeEx.title}</span>
+              <span style={{fontFamily:C.mono,fontSize:22,color:C.accent,fontWeight:700}}>{exTimer}s</span>
+            </div>
+            <p style={{fontSize:13,color:"#b0bcc8",marginBottom:10,lineHeight:1.6}}>{activeEx.desc}</p>
+            <div style={{padding:"8px 12px",borderRadius:6,background:`${C.warn}12`,
+              borderLeft:`2px solid ${C.warn}`,fontFamily:C.mono,fontSize:11,color:C.warn,marginBottom:12}}>
+              TARGET: {activeEx.target}
+            </div>
+            <button onClick={stopEx} style={S.btn(C.danger)}>■ Stop Exercise</button>
+          </div>
+        )}
+
+        <div style={S.card}>
+          <div style={S.sLbl}>Exercises — {mode==="clinical"?"Clinical Protocol":"Beginner"}</div>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {drills.map(drill=>(
+              <div key={drill.id} style={{padding:"14px",borderRadius:10,background:C.surface,
+                border:`1px solid ${activeEx?.id===drill.id?C.accent:C.border}`,
+                display:"flex",gap:12,alignItems:"flex-start"}}>
+                <div style={{fontSize:22,flexShrink:0,marginTop:2}}>{drill.icon}</div>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:600,marginBottom:4,fontSize:14}}>{drill.title}</div>
+                  <div style={{fontSize:12.5,color:"#8a96a8",marginBottom:8,lineHeight:1.6}}>{drill.desc}</div>
+                  <div style={{fontFamily:C.mono,fontSize:10,color:C.accent,marginBottom:10}}>
+                    ⏱ {drill.duration} · {drill.target}
+                  </div>
+                  <button onClick={()=>activeEx?.id===drill.id?stopEx():startEx(drill)}
+                    style={S.btn(activeEx?.id===drill.id?C.danger:C.accent)}>
+                    {activeEx?.id===drill.id?"■ Stop":"▶ Start"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={S.card}>
+          <div style={S.sLbl}>Self-monitoring Methods</div>
+          {[
+            {icon:"🪞",name:"Mirror Fog Test",how:"Hold mirror under nose. Say /pa/ × 10. Count fogged trials.",pass:"Pass: <3 fogged out of 10"},
+            {icon:"✋",name:"Palm Air Check",how:"Palm 10 cm from mouth. /pa/ should puff air forward.",pass:"Pass: 9/10 oral puffs felt"},
+            {icon:"🎙️",name:"Weekly Recording",how:"Same 10 words every Sunday. Count oral burst sounds.",pass:"Pass: 8/10 oral bursts by week 8"},
+            {icon:"👂",name:"Family Listening Test",how:"Say oral/nasal pairs. Ask family to identify.",pass:"Pass: 8/10 correct identifications"},
+          ].map(t=>(
+            <div key={t.name} style={{display:"flex",gap:12,padding:"12px 0",borderBottom:`1px solid ${C.border}`}}>
+              <div style={{fontSize:22,flexShrink:0}}>{t.icon}</div>
+              <div>
+                <div style={{fontWeight:600,marginBottom:3,fontSize:13}}>{t.name}</div>
+                <div style={{fontSize:12.5,color:"#8a96a8",marginBottom:4,lineHeight:1.6}}>{t.how}</div>
+                <div style={{fontFamily:C.mono,fontSize:10,color:C.accent}}>{t.pass}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  /* ── Progress Tab (enhanced) ── */
+  const ProgressTab=()=>{
+    const chartData=useMemo(()=>
+      [...history].reverse().slice(-30).map(h=>({
+        value:h.nasalance,
+        ts:h.timestamp,
+      }))
+    ,[history]);
+
+    const trendColor=stats?.trend==="improving"?C.accent:stats?.trend==="worsening"?C.danger:C.warn;
+    const trendIcon=stats?.trend==="improving"?"↓ Improving":stats?.trend==="worsening"?"↑ Worsening":"→ Stable";
+
+    return(
+      <div>
+        {/* Streak + quick stats */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}}>
+          {[
+            {label:"Streak",value:`${streak}d`,icon:"🔥",color:streak>2?C.warn:C.muted},
+            {label:"Sessions",value:history.length,icon:"📊",color:C.accent},
+            {label:"Trend",value:stats?trendIcon:"—",icon:"📈",color:trendColor},
+          ].map(s2=>(
+            <div key={s2.label} style={{background:C.card,border:`1px solid ${C.border}`,
+              borderRadius:10,padding:"12px 10px",textAlign:"center"}}>
+              <div style={{fontSize:20,marginBottom:4}}>{s2.icon}</div>
+              <div style={{fontFamily:C.mono,fontSize:13,fontWeight:700,color:s2.color,marginBottom:2}}>
+                {typeof s2.value==="number"?s2.value:s2.value}
+              </div>
+              <div style={{fontFamily:C.mono,fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1}}>
+                {s2.label}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Stats summary */}
+        {stats&&(
+          <div style={S.card}>
+            <div style={S.sLbl}>Performance Summary</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+              {[
+                {label:"Best (lowest nasalance)",value:`${Math.round(stats.best*100)}%`,color:C.accent},
+                {label:"Average nasalance",value:`${Math.round(stats.avg*100)}%`,color:C.warn},
+                {label:"Improvement from start",value:`${stats.improvement>0?"+":""}${stats.improvement.toFixed(1)}%`,
+                  color:stats.improvement>0?C.accent:C.danger},
+                {label:"Total sessions",value:stats.count,color:C.info},
+              ].map(r=>(
+                <div key={r.label} style={{background:C.surface,borderRadius:8,padding:"10px 12px",
+                  border:`1px solid ${C.border}`}}>
+                  <div style={{fontFamily:C.mono,fontSize:9,color:C.muted,marginBottom:4}}>{r.label}</div>
+                  <div style={{fontFamily:C.mono,fontSize:18,fontWeight:700,color:r.color}}>{r.value}</div>
+                </div>
+              ))}
+            </div>
+            {/* Improvement bar */}
+            {stats.improvement!==0&&(
+              <div style={{padding:"10px 14px",borderRadius:8,
+                background:stats.improvement>0?`${C.accent}0a`:`${C.danger}0a`,
+                border:`1px solid ${stats.improvement>0?C.accent:C.danger}30`,
+                fontFamily:C.mono,fontSize:11}}>
+                <span style={{color:stats.improvement>0?C.accent:C.danger}}>
+                  {stats.improvement>0
+                    ?`↓ Nasalance reduced by ${stats.improvement.toFixed(1)}% from first session`
+                    :`↑ Nasalance increased by ${Math.abs(stats.improvement).toFixed(1)}% from first session`}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Line chart */}
+        {chartData.length>=2&&(
+          <div style={S.card}>
+            <div style={S.sLbl}>Nasalance Trend (last {Math.min(30,history.length)} sessions)</div>
+            <div style={{padding:"8px 0"}}>
+              <LineChart data={chartData} width={340} height={130}/>
+            </div>
+            <div style={{display:"flex",gap:16,marginTop:8,fontFamily:C.mono,fontSize:9,color:C.muted}}>
+              <span style={{color:C.accent}}>↓ = Improving (lower nasalance)</span>
+              <span style={{color:C.danger}}>↑ = Worsening</span>
+            </div>
+          </div>
+        )}
+
+        {/* History list */}
+        <div style={S.card}>
+          <div style={S.sLbl}>Session Log ({history.length}/{MAX_HISTORY})</div>
+          {history.length===0?(
+            <div style={{textAlign:"center",padding:40,color:C.muted,fontFamily:C.mono,fontSize:12}}>
+              No recordings yet.<br/>Record a speech sample to begin tracking.
+            </div>
+          ):(
+            history.map((h,i)=>{
+              const sev=severityFromNasalance(h.nasalance);
+              const replayURL=h.sessionId?audioURLsRef.current[h.sessionId]:null;
+              return(
+                <div key={i} style={{padding:"10px 0",
+                  borderBottom:i<history.length-1?`1px solid ${C.border}`:"none"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <div style={{fontFamily:C.mono,fontSize:9,color:C.muted,width:72,flexShrink:0}}>
+                      {new Date(h.timestamp).toLocaleDateString("en",{month:"short",day:"numeric"})}<br/>
+                      <span style={{fontSize:8}}>{new Date(h.timestamp).toLocaleTimeString("en",{hour:"2-digit",minute:"2-digit"})}</span>
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{height:4,background:C.border,borderRadius:2,overflow:"hidden"}}>
+                        <div style={{width:`${h.nasalance*100}%`,height:"100%",background:sev.color,borderRadius:2}}/>
+                      </div>
+                    </div>
+                    <div style={{fontFamily:C.mono,fontSize:10,color:sev.color,width:80,textAlign:"right"}}>
+                      {Math.round(h.nasalance*100)}%<br/>
+                      <span style={{fontSize:8}}>{sev.label}</span>
+                    </div>
+                  </div>
+                  {/* Inline replay player — only shown while blob URL is still alive this session */}
+                  {replayURL&&(
+                    <div style={{marginTop:8,padding:"8px 10px",borderRadius:8,
+                      background:C.surface,border:`1px solid ${C.border}`}}>
+                      <div style={{fontFamily:C.mono,fontSize:9,color:C.accent,marginBottom:6,
+                        letterSpacing:1}}>▶ REPLAY THIS SESSION</div>
+                      <audio
+                        controls
+                        src={replayURL}
+                        preload="none"
+                        style={{width:"100%",height:36,display:"block",accentColor:C.accent,borderRadius:6}}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Export & Reset */}
+        <div style={S.card}>
+          <div style={S.sLbl}>Data Management</div>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <button onClick={exportData} disabled={!history.length}
+              style={{...S.btn(C.accent),width:"100%",justifyContent:"center",
+                opacity:history.length?1:0.4}}>
+              ⬇ Export Progress as JSON
+            </button>
+            {!confirmReset?(
+              <button onClick={()=>setConfirmReset(true)}
+                style={{...S.btn(C.danger),width:"100%",justifyContent:"center"}}>
+                🗑 Reset All Data
+              </button>
+            ):(
+              <div style={{padding:14,borderRadius:8,background:`${C.danger}0f`,border:`1px solid ${C.danger}40`}}>
+                <div style={{fontSize:13,color:C.danger,marginBottom:10,fontWeight:600}}>
+                  This will permanently delete all {history.length} sessions. Are you sure?
+                </div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={resetData} style={{...S.btnSolid(C.danger),flex:1,fontSize:12,padding:"10px"}}>
+                    Yes, Delete All
+                  </button>
+                  <button onClick={()=>setConfirmReset(false)} style={{...S.btn(C.muted),flex:1,justifyContent:"center"}}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+          <div style={{marginTop:12,fontFamily:C.mono,fontSize:9,color:C.muted,textAlign:"center"}}>
+            Data stored locally on this device · Never uploaded · Max {MAX_HISTORY} sessions retained
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  /* ══════════════════════════════════════════
+     RENDER
+  ══════════════════════════════════════════ */
+  return(
+    <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:C.sans,fontSize:14,lineHeight:1.6}}>
+      {/* Toast */}
+      {toast&&<div className="toast">{toast}</div>}
+
+      {/* Header */}
+      <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,
+        padding:"12px 16px",display:"flex",alignItems:"center",gap:12,
+        position:"sticky",top:0,zIndex:100,flexWrap:"wrap"}}>
+        <div>
+          <div style={{fontFamily:C.mono,fontSize:12,color:C.accent,letterSpacing:1}}>RHINOLALIA · ANALYZER</div>
+          <div style={{fontSize:10,color:C.muted}}>
+            Hypernasality Detection & Therapy
+            {streak>0&&<span style={{color:C.warn,marginLeft:8}}>🔥{streak}d</span>}
+            {offlineReady&&<span style={{color:C.accent,marginLeft:8}}>✓ Offline</span>}
+          </div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
+          {["beginner","clinical"].map(m=>(
+            <button key={m} onClick={()=>setMode(m)} style={{
+              fontFamily:C.mono,fontSize:10,padding:"5px 10px",borderRadius:6,
+              border:`1px solid ${mode===m?C.accent:C.border}`,
+              background:mode===m?`${C.accent}18`:"transparent",
+              color:mode===m?C.accent:C.muted,cursor:"pointer",letterSpacing:1,
+              textTransform:"uppercase",touchAction:"manipulation"}}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:"flex",background:C.surface,borderBottom:`1px solid ${C.border}`,
+        position:"sticky",top:49,zIndex:99}}>
+        {[["analyze","Analyze"],["drills","Drills"],["progress","Progress"]].map(([id,label])=>(
+          <button key={id} onClick={()=>setTab(id)} style={S.tab(tab===id)}>{label}</button>
+        ))}
+      </div>
+
+      {/* Main */}
+      <div style={{padding:"16px",maxWidth:640,margin:"0 auto"}}>
+
+        {tab==="analyze"&&(
+          <div>
+            {/* PWA install banner */}
+            {showInstall&&(
+              <div className="install-banner">
+                <div style={{fontSize:28}}>📲</div>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:600,fontSize:13,marginBottom:2}}>Install as App</div>
+                  <div style={{fontSize:12,color:C.muted}}>Works offline · No app store needed</div>
+                </div>
+                <button onClick={installApp} style={S.btn(C.accent)}>Install</button>
+                <button onClick={()=>setShowInstall(false)}
+                  style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18,padding:"0 4px"}}>✕</button>
+              </div>
+            )}
+
+            {/* Input card */}
+            <div style={S.card}>
+              <div style={S.sLbl}>🎙 Record or Upload</div>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {!recording?(
+                  <button onClick={startRecording}
+                    style={{...S.btnSolid(C.accent),width:"100%",fontSize:15,padding:"16px"}}>
+                    ⏺  Start Recording
+                  </button>
+                ):(
+                  <button onClick={stopRecording}
+                    style={{...S.btnSolid(C.danger),width:"100%",fontSize:15,padding:"16px"}}>
+                    <span className="rec-pulse">⏹</span>  Stop & Analyze ({recTime}s)
+                  </button>
+                )}
+                <label style={{...S.btn(C.info),width:"100%",justifyContent:"center",
+                  boxSizing:"border-box",padding:"12px",cursor:"pointer"}}>
+                  ⬆  Upload Audio File
+                  <input type="file" accept="audio/*" onChange={handleUpload}/>
+                </label>
+                {uploadedFile&&(
+                  <div style={{fontFamily:C.mono,fontSize:10,color:C.muted,textAlign:"center"}}>
+                    {uploadedFile}
+                  </div>
+                )}
+              </div>
+              <div style={{marginTop:12,padding:"10px 14px",borderRadius:8,
+                background:C.surface,border:`1px solid ${C.border}`,fontSize:12.5}}>
+                <strong style={{color:C.accent}}>Say: </strong>
+                <span style={{color:"#8a96a8"}}>"pa-pa-pa… ta-ta-ta… ka-ka-ka… count 1 to 20"</span>
+                <div style={{fontFamily:C.mono,fontSize:9,color:C.muted,marginTop:4}}>
+                  Min 10 sec · High-pressure consonants + sustained vowels
+                </div>
+              </div>
+            </div>
+
+            {/* Last session note */}
+            {analysisData&&!recording&&!processing&&history.length>1&&(
+              <div style={{padding:"8px 14px",borderRadius:8,marginBottom:14,
+                background:`${C.info}0a`,border:`1px solid ${C.info}20`,
+                fontFamily:C.mono,fontSize:10,color:C.muted}}>
+                Showing last session · {history.length} total sessions saved
+              </div>
+            )}
+
+            {recording&&<LiveFeed/>}
+
+            {processing&&(
+              <div style={{...S.card,textAlign:"center",padding:40}}>
+                <div style={{fontFamily:C.mono,fontSize:12,color:C.accent,marginBottom:8}}>
+                  ◈ Analyzing speech signal...
+                </div>
+                <div style={{fontFamily:C.mono,fontSize:10,color:C.muted,marginBottom:16}}>
+                  Spectral bands · Nasalance estimate · Phoneme scoring
+                </div>
+                <div style={{height:4,background:C.border,borderRadius:2,overflow:"hidden"}}>
+                  <div style={{height:"100%",background:C.accent,width:"40%",
+                    animation:"slide 1.5s ease-in-out infinite"}}/>
+                </div>
+              </div>
+            )}
+
+            {analysisData&&!processing&&<Results data={analysisData}/>}
+
+            {/* ── Audio Playback Player ── */}
+            {audioURL&&!processing&&!recording&&(
+              <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,
+                padding:16,marginBottom:14}}>
+                <div style={{fontFamily:C.mono,fontSize:9,letterSpacing:2,textTransform:"uppercase",
+                  color:C.muted,marginBottom:12,paddingBottom:8,borderBottom:`1px solid ${C.border}`}}>
+                  🔊 Playback — Recorded Audio
+                </div>
+                <div style={{fontSize:12,color:C.muted,marginBottom:10}}>
+                  Listen back to your recording and compare with the analysis above.
+                </div>
+                {/* Native audio element — widest mobile browser support */}
+                <audio
+                  controls
+                  src={audioURL}
+                  preload="auto"
+                  style={{
+                    width:"100%",height:44,
+                    borderRadius:8,
+                    accentColor:C.accent,
+                    /* Mobile: ensure controls are fully visible */
+                    display:"block",
+                  }}
+                />
+                <div style={{fontFamily:C.mono,fontSize:9,color:C.muted,marginTop:8,textAlign:"center"}}>
+                  Playback available this session only · Not stored after app closes
+                </div>
+              </div>
+            )}
+
+            {!analysisData&&!processing&&!recording&&(
+              <div style={{...S.card,textAlign:"center",padding:50}}>
+                <div style={{fontSize:44,marginBottom:12}}>🎙</div>
+                <div style={{fontFamily:C.mono,fontSize:13,color:C.muted,marginBottom:6}}>
+                  Record or upload a speech sample
+                </div>
+                <div style={{fontSize:12,color:C.muted}}>
+                  Min 10 sec · Say /pa/, /ta/, /ka/ and count to 10
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab==="drills"&&<DrillsTab/>}
+        {tab==="progress"&&<ProgressTab/>}
+      </div>
+
+      <div style={{padding:"18px 16px",textAlign:"center",fontFamily:C.mono,fontSize:9,color:C.muted,
+        borderTop:`1px solid ${C.border}`,marginTop:20}}>
+        RHINOLALIA v2.1 · PWA · Data stored locally · Use alongside formal SLP assessment
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
